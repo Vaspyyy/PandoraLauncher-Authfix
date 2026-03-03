@@ -1,34 +1,18 @@
 use gpui::{prelude::FluentBuilder, *};
-use gpui_component::{ActiveTheme, Colorize, h_flex, scroll::ScrollableElement, v_flex};
+use gpui_component::{ActiveTheme, Colorize, h_flex};
 use once_cell::sync::Lazy;
 
-use crate::icon::PandoraIcon;
+use crate::{component::page_path::PagePath, icon::PandoraIcon};
 
 #[derive(IntoElement)]
-pub struct Page {
-    title: AnyElement,
-    scrollable: bool,
-    children: Vec<AnyElement>,
+pub struct TitleBar {
+    path: PagePath,
+    controls: AnyElement
 }
 
-impl Page {
-    pub fn new(title: impl IntoElement) -> Self {
-        Self {
-            title: title.into_any_element(),
-            scrollable: false,
-            children: Vec::new(),
-        }
-    }
-
-    pub fn scrollable(mut self) -> Self {
-        self.scrollable = true;
-        self
-    }
-}
-
-impl ParentElement for Page {
-    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
-        self.children.extend(elements);
+impl TitleBar {
+    pub fn new(path: PagePath, controls: AnyElement) -> Self {
+        Self { path, controls }
     }
 }
 
@@ -37,13 +21,13 @@ struct TitleBarState {
     should_move: bool,
 }
 
-impl RenderOnce for Page {
-    fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl IntoElement {
+impl RenderOnce for TitleBar {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state("title-bar-state", cx, |_, _| TitleBarState::default());
 
         let window_controls = window.window_controls();
 
-        let title = h_flex()
+        h_flex()
             .id("bar")
             .window_control_area(WindowControlArea::Drag)
             .on_mouse_down_out(window.listener_for(&state, |state, _, _, _| {
@@ -75,14 +59,16 @@ impl RenderOnce for Page {
             .border_b_1()
             .border_color(cx.theme().border)
             .text_xl()
-            .child(div().left_2()
+            .child(h_flex()
+                .left_2()
+                .gap_8()
                 .on_any_mouse_down(|_, window, cx| {
                     if window.default_prevented() {
                         cx.stop_propagation();
                     }
                 })
-                .bg(gpui::red())
-                .child(self.title))
+                .child(self.path)
+                .child(self.controls))
             .child(h_flex().absolute().right_0().pr_4()
                 .gap_1()
                 .on_any_mouse_down(|_, window, cx| {
@@ -98,21 +84,7 @@ impl RenderOnce for Page {
                 } else {
                     WindowControl::Maximize
                 }))
-                .child(WindowControl::Close));
-
-        if self.scrollable {
-            v_flex()
-                .size_full()
-                .child(title)
-                .child(div().flex_1().overflow_hidden().child(
-                    v_flex().size_full().overflow_y_scrollbar().children(self.children),
-                ))
-        } else {
-            v_flex()
-                .size_full()
-                .child(title)
-                .children(self.children)
-        }
+                .child(WindowControl::Close))
     }
 }
 
