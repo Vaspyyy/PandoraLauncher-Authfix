@@ -2,7 +2,7 @@ use std::{borrow::Cow, io::{BufRead, Read}, sync::Arc, time::{Duration, Instant,
 
 use auth::{credentials::AccountCredentials, models::{MinecraftAccessToken}, secret::PlatformSecretStorage};
 use bridge::{
-    install::{ContentDownload, ContentInstall, ContentInstallFile, InstallTarget}, instance::{ContentSummary, ContentType, InstanceStatus}, message::{AccountCapesResult, AccountSkinResult, BackendConfigWithPassword, LogFiles, MessageToBackend, MessageToFrontend}, meta::MetadataResult, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTracker, ProgressTrackerFinishType}, serial::AtomicOptionSerial
+    install::{ContentDownload, ContentInstall, ContentInstallFile, InstallTarget}, instance::{ContentSummary, ContentType, InstanceStatus}, keep_alive::KeepAlive, message::{AccountCapesResult, AccountSkinResult, BackendConfigWithPassword, LogFiles, MessageToBackend, MessageToFrontend}, meta::MetadataResult, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTracker, ProgressTrackerFinishType}, serial::AtomicOptionSerial
 };
 use futures::TryFutureExt;
 use schema::{auxiliary::AuxiliaryContentMeta, content::ContentSource, curseforge::{CurseforgeGetModFilesRequest, CurseforgeModLoaderType}, minecraft_profile::MinecraftProfileResponse, modrinth::ModrinthLoader, version::{LaunchArgument, LaunchArgumentValue}};
@@ -111,11 +111,11 @@ impl BackendState {
                 }
             },
             MessageToBackend::SetInstancePreferredAccount { id, account } => {
-            	if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
-           			instance.configuration.modify(|configuration| {
-           				configuration.preferred_account = account;
-              		});
-             	}
+                if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+                       instance.configuration.modify(|configuration| {
+                           configuration.preferred_account = account;
+                      });
+                 }
             }
             MessageToBackend::SetInstancePreferredLoaderVersion { id, loader_version } => {
                 if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
@@ -175,50 +175,57 @@ impl BackendState {
                 }
             },
             MessageToBackend::KillInstance { id } => {
-                if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
-                    if let Some(mut child) = instance.child.take() {
-                        let result = child.kill();
-                        if result.is_err() {
-                            self.send.send_error("Failed to kill instance");
-                            log::error!("Failed to kill instance: {:?}", result.unwrap_err());
-                        }
+                let mut instance_state = self.instance_state.write();
+                let Some(instance) = instance_state.instances.get_mut(id) else {
+                    self.send.send_error("Can't kill instance, unknown id");
+                    return;
+                };
 
-                        self.send.send(instance.create_modify_message());
-                    } else {
-                        self.send.send_error("Can't kill instance, instance wasn't running");
-                    }
+                if instance.processes.is_empty() {
+                    self.send.send_error("Can't kill instance, instance wasn't running");
                     return;
                 }
 
-                self.send.send_error("Can't kill instance, unknown id");
+                for mut process in instance.processes.drain(..) {
+                    let result = process.kill();
+                    if result.is_err() {
+                        self.send.send_error("Failed to kill instance");
+                        log::error!("Failed to kill instance: {:?}", result.unwrap_err());
+                    }
+                }
+
+                self.send.send(instance.create_modify_message());
             },
             MessageToBackend::StartInstance {
                 id,
                 quick_play,
                 modal_action,
             } => {
-	            let (dot_minecraft, configuration) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
-	                if instance.child.is_some() {
-	                    self.send.send_warning("Can't launch instance, already running");
-	                    modal_action.set_error_message("Can't launch instance, already running".into());
-	                    modal_action.set_finished();
-	                    return;
-	                }
+                let keepalive = KeepAlive::new();
 
-	                self.send.send(MessageToFrontend::MoveInstanceToTop {
-	                    id
-	                });
-	                self.send.send(instance.create_modify_message_with_status(InstanceStatus::Launching));
+                let (dot_minecraft, configuration) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+                    if let Some(launch_keepalive) = &instance.launch_keepalive && launch_keepalive.is_alive() {
+                        modal_action.set_error_message("Can't launch instance, already launching".into());
+                        modal_action.set_finished();
+                        return;
+                    }
 
-	                (instance.dot_minecraft_path.clone(), instance.configuration.get().clone())
-	            } else {
-	                self.send.send_error("Can't launch instance, unknown id");
-	                modal_action.set_error_message("Can't launch instance, unknown id".into());
-	                modal_action.set_finished();
-	                return;
-	            };
+                    instance.launch_keepalive = Some(keepalive.create_handle());
 
-            	let Some(login_info) = self.get_login_info(&modal_action, configuration.preferred_account).await else {
+                    self.send.send(MessageToFrontend::MoveInstanceToTop {
+                        id
+                    });
+                    self.send.send(instance.create_modify_message());
+
+                    (instance.dot_minecraft_path.clone(), instance.configuration.get().clone())
+                } else {
+                    self.send.send_error("Can't launch instance, unknown id");
+                    modal_action.set_error_message("Can't launch instance, unknown id".into());
+                    modal_action.set_finished();
+                    return;
+                };
+
+                let Some(login_info) = self.get_login_info(&modal_action, configuration.preferred_account).await else {
                     return;
                 };
 
@@ -264,7 +271,7 @@ impl BackendState {
                         child.stdout.take();
 
                         if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
-                            instance.child = Some(child);
+                            instance.processes.push(child);
                         }
                     },
                     Err(ref err) => {
@@ -273,6 +280,8 @@ impl BackendState {
                     },
                 }
 
+                drop(keepalive);
+
                 if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
                     self.send.send(instance.create_modify_message());
                 }
@@ -280,9 +289,6 @@ impl BackendState {
                 launch_tracker.set_finished(if is_err { ProgressTrackerFinishType::Error } else { ProgressTrackerFinishType::Normal });
                 launch_tracker.notify();
                 modal_action.set_finished();
-
-                return;
-
             },
             MessageToBackend::SetContentEnabled { id, content_ids: mod_ids, enabled } => {
                 let mut instance_state = self.instance_state.write();

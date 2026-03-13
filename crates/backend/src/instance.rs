@@ -7,7 +7,7 @@ use base64::Engine;
 use bridge::{
     instance::{
         ContentSummary, ContentUpdateContext, ContentUpdateStatus, InstanceContentID, InstanceContentSummary, InstanceID, InstanceServerSummary, InstanceStatus, InstanceWorldSummary
-    }, message::{BridgeDataLoadState, MessageToFrontend}, notify_signal::{KeepAliveNotifySignal, KeepAliveNotifySignalHandle}
+    }, keep_alive::KeepAliveHandle, message::{BridgeDataLoadState, MessageToFrontend}, notify_signal::{KeepAliveNotifySignal, KeepAliveNotifySignalHandle}
 };
 use futures::FutureExt;
 use relative_path::RelativePath;
@@ -31,7 +31,8 @@ pub struct Instance {
     pub icon: Option<Arc<[u8]>>,
     pub configuration: Persistent<InstanceConfiguration>,
 
-    pub child: Option<Child>,
+    pub launch_keepalive: Option<KeepAliveHandle>,
+    pub processes: Vec<Child>,
 
     pub worlds_state: BridgeDataLoadState,
     dirty_worlds: FolderChanges,
@@ -738,7 +739,8 @@ impl Instance {
             icon,
             configuration: instance_info,
 
-            child: None,
+            launch_keepalive: None,
+            processes: Vec::new(),
 
             worlds_state: BridgeDataLoadState::default(),
             dirty_worlds: FolderChanges::all_dirty(),
@@ -838,15 +840,25 @@ impl Instance {
     }
 
     pub fn status(&self) -> InstanceStatus {
-        if self.child.is_some() {
+        if !self.processes.is_empty() {
             InstanceStatus::Running
+        } else if let Some(keepalive) = &self.launch_keepalive && keepalive.is_alive() {
+            InstanceStatus::Launching
         } else {
             InstanceStatus::NotRunning
         }
     }
 
     pub fn create_modify_message(&mut self) -> MessageToFrontend {
-        self.create_modify_message_with_status(self.status())
+        MessageToFrontend::InstanceModified {
+            id: self.id,
+            name: self.name,
+            icon: self.icon.clone(),
+            root_path: self.resolve_real_root_path(),
+            dot_minecraft_folder: self.dot_minecraft_path.clone(),
+            configuration: self.configuration.get().clone(),
+            status: self.status(),
+        }
     }
 
     pub fn resolve_real_root_path(&self) -> Arc<Path> {
@@ -859,18 +871,6 @@ impl Instance {
             target.into()
         } else {
             self.root_path.clone()
-        }
-    }
-
-    pub fn create_modify_message_with_status(&mut self, status: InstanceStatus) -> MessageToFrontend {
-        MessageToFrontend::InstanceModified {
-            id: self.id,
-            name: self.name,
-            icon: self.icon.clone(),
-            root_path: self.resolve_real_root_path(),
-            dot_minecraft_folder: self.dot_minecraft_path.clone(),
-            configuration: self.configuration.get().clone(),
-            status,
         }
     }
 }

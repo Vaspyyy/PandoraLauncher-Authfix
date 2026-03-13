@@ -412,11 +412,17 @@ impl BackendState {
 
         let mut instance_state = self.instance_state.write();
         for instance in instance_state.instances.iter_mut() {
-            if let Some(child) = &mut instance.child
-                && !matches!(child.try_wait(), Ok(None))
-            {
-                log::debug!("Child process is no longer alive");
-                instance.child = None;
+            let mut changed = false;
+            instance.processes.retain_mut(|child| {
+                if matches!(child.try_wait(), Ok(None)) {
+                    true
+                } else {
+                    log::debug!("Child process {} is no longer alive", child.id());
+                    changed = true;
+                    false
+                }
+            });
+            if changed {
                 self.send.send(instance.create_modify_message());
             }
         }
