@@ -600,8 +600,8 @@ impl Launcher {
         let version: PartialMinecraftVersion = serde_json::from_slice(&version_file.bytes()?)?;
 
         // Download mirror list
-        let mirror = if check_mirrors {
-            Self::download_random_mirror(http_client, &install_profile.mirror_list).await
+        let mirror = if check_mirrors && let Some(mirror_list) = &install_profile.mirror_list {
+            Self::download_random_mirror(http_client, mirror_list).await
         } else {
             None
         };
@@ -612,6 +612,32 @@ impl Launcher {
         // Download libraries
         let libraries = install_profile.libraries.iter().filter_map(|library| {
             let mut artifact = library.downloads.artifact.clone()?;
+            if let Some(builtin) = installer_zip.by_name(format!("maven/{}", artifact.path)) {
+                if !path_is_normal(artifact.path.as_str()) {
+                    log::warn!("Refusing to install artifact with illegal path: {}", artifact.path);
+                    return None;
+                }
+
+                let path = self.directories.libraries_dir.join(artifact.path);
+
+                if let Some(sha1) = &artifact.sha1 {
+                    let mut expected_hash = [0u8; 20];
+                    if hex::decode_to_slice(sha1.as_str(), &mut expected_hash).is_ok() {
+                        if crate::check_sha1_hash(&path, expected_hash).unwrap_or(false) {
+                            return None;
+                        }
+                    };
+                }
+
+                if let Ok(bytes) = builtin.bytes() {
+                    _ = crate::write_safe(&path, &bytes);
+                } else {
+                    log::warn!("Unable to copy {} from zip", artifact.path);
+                }
+            }
+            if artifact.url.is_empty() {
+                return None;
+            }
             if let Some(mirror) = &mirror {
                 if artifact.url.starts_with("http") && !artifact.url.starts_with("https://libraries.minecraft.net/") && artifact.url.ends_with(artifact.path.as_str()) {
                     artifact.url = format!("{}{}", mirror, artifact.path).into();
@@ -784,7 +810,13 @@ impl Launcher {
         launch_tracker.add_count(1);
         launch_tracker.notify();
 
-        Ok((Arc::new(version.apply_to(&base_version)), AddVanillaJar::No))
+        let add_vanilla_jar = if install_profile.processors.is_empty() {
+            AddVanillaJar::Yes
+        } else {
+            AddVanillaJar::No
+        };
+
+        Ok((Arc::new(version.apply_to(&base_version)), add_vanilla_jar))
     }
 
     async fn create_forgelike_install_version_legacy(
