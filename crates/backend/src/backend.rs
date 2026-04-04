@@ -428,15 +428,38 @@ impl BackendState {
         let mut instance_state = self.instance_state.write();
         for instance in instance_state.instances.iter_mut() {
             let mut killed = false;
-            instance.processes.retain_mut(|child| {
-                if matches!(child.try_wait(), Ok(None)) {
+
+            instance.processes.retain_mut(|process| {
+                if matches!(process.try_wait(), Ok(None)) {
                     true
                 } else {
-                    log::debug!("Child process {} is no longer alive", child.id());
+                    log::debug!("Child process {} is no longer alive", process.id());
                     killed = true;
                     false
                 }
             });
+            instance.closing_processes.retain_mut(|(process, _)| {
+                if matches!(process.try_wait(), Ok(None)) {
+                    true
+                } else {
+                    log::debug!("Child process {} is no longer alive", process.id());
+                    killed = true;
+                    false
+                }
+            });
+
+            let now = Instant::now();
+            let to_kill = instance.closing_processes.extract_if(.., |(_, deadline)| {
+                now > *deadline
+            });
+            for (process, _) in to_kill {
+                let result = process.kill();
+                killed = true;
+                if let Err(err) = result {
+                    self.send.send_error("Failed to kill instance");
+                    log::error!("Failed to kill instance: {err:?}");
+                }
+            }
 
             if killed {
                 instance.update_session();

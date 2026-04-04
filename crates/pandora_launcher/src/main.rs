@@ -2,6 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::fmt::Write;
@@ -9,8 +11,8 @@ use std::time::{Duration, SystemTime};
 
 use bridge::message::MessageToFrontend;
 use bridge::modal_action::ModalAction;
-use clap::Parser;
-use command::PandoraSandbox;
+use clap::{Parser, Subcommand};
+use command::{PandoraCommand, PandoraSandbox};
 use fern::colors::ColoredLevelConfig;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use native_dialog::DialogBuilder;
@@ -18,16 +20,30 @@ use parking_lot::RwLock;
 
 #[derive(Parser, Debug)]
 #[command()]
-struct Args {
+struct Cli {
     /// Instance to launch, instead of opening the launcher
     #[arg(long)]
     run_instance: Option<String>,
+    /// Internal function to set traversable ACLs in an elevated context
+    #[cfg(windows)]
+    #[arg(long, hide = false, num_args = 2..)]
+    internal_set_traverse_acls: Option<Vec<OsString>>,
 }
 
 pub mod panic;
 
 fn main() {
-    let args = Args::parse();
+    let cli = Cli::parse();
+
+    #[cfg(windows)]
+    if let Some(internal_set_traverse_acls) = cli.internal_set_traverse_acls {
+        if let Err(err) = command::set_traverse_acls(internal_set_traverse_acls) {
+            eprintln!("Unable to set traverse ACLs: {err}");
+            std::process::exit(1);
+        } else {
+            std::process::exit(0);
+        }
+    }
 
     let data_dir = if let Some(portable_dir) = get_portable_dir() {
         portable_dir
@@ -54,10 +70,46 @@ fn main() {
 
     panic::install_logging_hook();
 
-    if let Some(run_instance) = args.run_instance {
+    // if true {
+    //     let mut command = PandoraCommand::new("powershell.exe");
+    //     command.arg("-Command");
+    //     // command.arg("/K");
+    //     // command.arg("Start-Sleep -Seconds 2; Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show('Hello, World!')");
+    //     // command.arg("FOR %%I IN (.) DO @echo %%~fI");
+    //     // command.arg("whoami");
+    //     // command.arg("/all");
+    //     // command.arg("/priv");
+    //     // command.arg("Get-Content C:\\Users\\james\\Desktop\\test.txt");
+    //     command.arg("Get-Content C:\\Users\\james\\Desktop\\test.txt");
+    //     // command.stdout(command::PandoraStdioReadMode::Pipe);
+
+    //     let working = Path::new("C:\\Users\\james\\AppData\\Roaming\\PandoraLauncher\\instances\\MyInstance\\.minecraft");
+    //     command.current_dir(&working);
+
+    //     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    //     let mut command = rt.block_on(command.spawn_sandboxed(PandoraSandbox {
+    //         allow_read: Default::default(),
+    //         allow_write: vec![working.into()],
+    //         is_jvm: true,
+    //         name: Arc::from(OsStr::new("PandoraInstanceSandbox")),
+    //         description: Arc::from(OsStr::new("Sandbox for Minecraft instances run by Pandora Launcher"))
+    //     })).unwrap();
+    //     // let mut command = rt.block_on(command.spawn()).unwrap();
+    //     // dbg!(&command);
+    //     // let mut buf = String::new();
+    //     // command.stdout.unwrap().read_to_string(&mut buf).unwrap();
+    //     // dbg!(&buf);
+    //     std::thread::sleep(Duration::from_secs(3));
+
+    //     return;
+    // }
+
+    if let Some(run_instance) = cli.run_instance {
         let (backend_recv, backend_handle, mut frontend_recv, frontend_handle) = bridge::handle::create_pair();
 
         backend::start(launcher_dir.clone(), frontend_handle, backend_handle.clone(), backend_recv);
+
+        let mut found_instance = false;
 
         while let Some(message) = frontend_recv.try_recv() {
             if let MessageToFrontend::InstanceAdded { id, name, .. } = message {
@@ -70,6 +122,7 @@ fn main() {
                         modal_action: modal_action.clone()
                     });
                     run_modal_action(modal_action);
+                    // todo: remove this sleep after daemonizing
                     std::thread::sleep(std::time::Duration::from_millis(100));
                     return;
                 }

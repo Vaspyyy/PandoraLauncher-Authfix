@@ -1,11 +1,15 @@
 use std::{ffi::OsStr, io::Error};
 
-use crate::{PandoraCommand, process::PandoraProcess};
+use crate::{PandoraChild, PandoraCommand, process::PandoraProcess};
 
-pub fn spawn(mut cmd: PandoraCommand) -> std::io::Result<PandoraProcess> {
+pub fn spawn(mut cmd: PandoraCommand) -> std::io::Result<PandoraChild> {
     let Some(pkexec) = crate::path_cache::get_command_path(OsStr::new("pkexec")) else {
         return Err(Error::new(std::io::ErrorKind::NotFound, "cannot find 'pkexec'"));
     };
+
+    if command.inherit_env.is_some() || !command.env.is_empty() {
+        return Err(Error::new(ErrorKind::InvalidInput, "cannot set custom environment for elevated process"));
+    }
 
     let mut executable = std::mem::replace(&mut cmd.executable, pkexec.as_os_str().to_os_string().into());
 
@@ -23,5 +27,5 @@ pub fn spawn(mut cmd: PandoraCommand) -> std::io::Result<PandoraProcess> {
     cmd.stdin = crate::PandoraStdioWriteMode::Null;
     cmd.stdout = crate::PandoraStdioReadMode::Null;
     cmd.stderr = crate::PandoraStdioReadMode::Null;
-    Ok(cmd.spawn()?.process)
+    crate::unix::unix_spawn::spawn(cmd)
 }

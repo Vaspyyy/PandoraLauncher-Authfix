@@ -1284,14 +1284,18 @@ name = "command"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "junction",
  "libc",
  "libseccomp",
  "log",
  "once_cell",
  "parking_lot",
  "rustc-hash 2.1.1",
+ "scopeguard",
  "security-framework 3.7.0",
  "security-framework-sys",
+ "tokio",
+ "windows 0.62.2",
 ]
 
 [[package]]

@@ -210,7 +210,9 @@ pub fn spawn(mut command: PandoraCommand, sandbox: PandoraSandbox) -> std::io::R
 
     builder.push_str("--die-with-parent");
     builder.push_str("--unshare-all");
-    builder.push_str("--share-net");
+    if sandbox.grant_network_access {
+        builder.push_str("--share-net");
+    }
 
     builder.push_str("--proc");
     builder.push_str("/proc");
@@ -383,7 +385,7 @@ pub fn spawn(mut command: PandoraCommand, sandbox: PandoraSandbox) -> std::io::R
     }
 
     command.args.splice(0..0, builder.command);
-    command.spawn()
+    crate::unix::unix_spawn::spawn(command)
 }
 
 static DBUS_PROXY: OnceCell<Option<DbusProxy>> = OnceCell::new();

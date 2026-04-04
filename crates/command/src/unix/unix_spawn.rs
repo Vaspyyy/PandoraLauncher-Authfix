@@ -5,6 +5,18 @@ use libc::c_char;
 use crate::{PandoraArg, PandoraChild, PandoraCommand, PandoraStdioReadMode, PandoraStdioWriteMode, process::PandoraProcess, unix::unix_helpers::{cvt, cvt_r, environ}};
 
 pub fn spawn(mut command: PandoraCommand) -> std::io::Result<PandoraChild> {
+    let resolved = if command.executable.0.as_encoded_bytes().contains(&b'/') {
+        let path = Path::new(&command.executable.0);
+        let Ok(path) = path.canonicalize() else {
+            return Err(Error::new(ErrorKind::NotFound, "executable file doesn't exist"));
+        };
+        path
+    } else if let Some(path) = crate::path_cache::get_command_path(&command.executable.0) {
+        path.to_path_buf()
+    } else {
+        return Err(Error::new(ErrorKind::NotFound, "unable to resolve executable"));
+    };
+
     if let Some(inherit_env) = command.inherit_env {
         for (k, v) in std::env::vars_os() {
             let k: PandoraArg = k.into();
@@ -26,6 +38,7 @@ pub fn spawn(mut command: PandoraCommand) -> std::io::Result<PandoraChild> {
         }
     }
 
+    // todo: the raw ptrs here won't be dropped if an error occurs
     let mut env: Vec<*const c_char> = Vec::with_capacity(command.env.len() + 1);
     for (k, v) in command.env {
         let mut k = k.0.into_owned();
@@ -41,18 +54,6 @@ pub fn spawn(mut command: PandoraCommand) -> std::io::Result<PandoraChild> {
     }
     env.push(std::ptr::null_mut());
 
-    let resolved = if command.executable.0.as_encoded_bytes().contains(&b'/') {
-        let path = Path::new(&command.executable.0);
-        let Ok(path) = path.canonicalize() else {
-            return Err(Error::new(ErrorKind::NotFound, "executable file doesn't exist"));
-        };
-        path
-    } else if let Some(path) = crate::path_cache::get_command_path(&command.executable.0) {
-        path.to_path_buf()
-    } else {
-        return Err(Error::new(ErrorKind::NotFound, "unable to resolve executable"));
-    };
-
     debug_assert!(resolved.is_absolute());
 
     let Ok(program) = CString::new(resolved.clone().into_os_string().into_vec()) else {
@@ -65,6 +66,7 @@ pub fn spawn(mut command: PandoraCommand) -> std::io::Result<PandoraChild> {
     let mut stdout_read = None;
     let mut stderr_read = None;
 
+    // todo: the raw fds here won't be closed if an error occurs
     let mut stdin_read = None;
     let mut stdout_write = None;
     let mut stderr_write = None;
@@ -74,7 +76,7 @@ pub fn spawn(mut command: PandoraCommand) -> std::io::Result<PandoraChild> {
     match command.stdin {
         PandoraStdioWriteMode::Null => {
             if null_fd.is_none() {
-                let dev_null = unsafe { cvt(libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY))? };
+                let dev_null = unsafe { cvt(libc::open(c"/dev/null".as_ptr(), libc::O_RDWR))? };
                 null_fd = Some(dev_null);
             }
             stdin_read = null_fd.clone();
@@ -94,7 +96,7 @@ pub fn spawn(mut command: PandoraCommand) -> std::io::Result<PandoraChild> {
         },
         PandoraStdioReadMode::Null => {
             if null_fd.is_none() {
-                let dev_null = unsafe { cvt(libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY))? };
+                let dev_null = unsafe { cvt(libc::open(c"/dev/null".as_ptr(), libc::O_RDWR))? };
                 null_fd = Some(dev_null);
             }
             stdout_write = null_fd.clone();
@@ -109,7 +111,7 @@ pub fn spawn(mut command: PandoraCommand) -> std::io::Result<PandoraChild> {
         },
         PandoraStdioReadMode::Null => {
             if null_fd.is_none() {
-                let dev_null = unsafe { cvt(libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY))? };
+                let dev_null = unsafe { cvt(libc::open(c"/dev/null".as_ptr(), libc::O_RDWR))? };
                 null_fd = Some(dev_null);
             }
             stderr_write = null_fd.clone();
@@ -117,6 +119,7 @@ pub fn spawn(mut command: PandoraCommand) -> std::io::Result<PandoraChild> {
         PandoraStdioReadMode::Inherit => {},
     }
 
+    // todo: the raw ptrs here won't be dropped if an error occurs
     let mut argv: Vec<*const c_char> = Vec::with_capacity(command.args.len() + 1);
     argv.push(program.as_ptr()); // arg0 is program name
     for arg in command.args {
@@ -127,6 +130,8 @@ pub fn spawn(mut command: PandoraCommand) -> std::io::Result<PandoraChild> {
         }
     }
     argv.push(std::ptr::null_mut());
+
+    compile_error!("set current dir");
 
     let pid = unsafe { cvt(libc::fork())? };
 
