@@ -434,7 +434,9 @@ impl Render for LauncherUI {
             let account_name = account.username(InterfaceConfig::get(cx).hide_usernames);
             let hide_skins = InterfaceConfig::get(cx).hide_skins;
 
-            let head = if let Some(head) = &account.head && !hide_skins {
+            let head = if hide_skins {
+                gpui::img(ImageSource::Resource(Resource::Embedded("images/hidden_head.png".into())))
+            } else if let Some(head) = &account.head {
                 let resize = png_render_cache::ImageTransformation::Resize { width: 32, height: 32 };
                 png_render_cache::render_with_transform(head.clone(), resize, cx)
             } else {
@@ -484,7 +486,9 @@ impl Render for LauncherUI {
                         };
 
                         let items = accounts.iter().map(|account| {
-                            let head = if let Some(head) = &account.head && !hide_skins {
+                            let head = if hide_skins {
+                                gpui::img(ImageSource::Resource(Resource::Embedded("images/hidden_head.png".into())))
+                            } else if let Some(head) = &account.head {
                                 let resize = png_render_cache::ImageTransformation::Resize { width: 32, height: 32 };
                                 png_render_cache::render_with_transform(head.clone(), resize, cx)
                             } else {
