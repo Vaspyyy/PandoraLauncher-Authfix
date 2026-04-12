@@ -2,7 +2,7 @@ use std::{borrow::Cow, io::{BufRead, Read}, sync::{Arc, atomic::Ordering}, time:
 
 use auth::{credentials::AccountCredentials, models::MinecraftAccessToken, secret::PlatformSecretStorage};
 use bridge::{
-    install::{ContentDownload, ContentInstall, ContentInstallFile, ContentInstallPath, InstallTarget}, instance::{ContentSummary, ContentType}, keep_alive::KeepAlive, message::{AccountCapesResult, AccountSkinResult, BackendConfigWithPassword, EmbeddedOrRaw, LogFiles, MessageToBackend, MessageToFrontend}, meta::MetadataResult, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTracker, ProgressTrackerFinishType}, safe_path::SafePath, serial::AtomicOptionSerial
+    install::{ContentDownload, ContentInstall, ContentInstallFile, ContentInstallPath, InstallTarget}, instance::{ContentSummary, ContentType, InstanceID}, keep_alive::KeepAlive, message::{AccountCapesResult, AccountSkinResult, BackendConfigWithPassword, EmbeddedOrRaw, LogFiles, MessageToBackend, MessageToFrontend, QuickPlayLaunch}, meta::MetadataResult, modal_action::{ModalAction, ModalActionVisitUrl, ProgressTracker, ProgressTrackerFinishType}, safe_path::SafePath, serial::AtomicOptionSerial
 };
 use futures::TryFutureExt;
 use schema::{auxiliary::AuxiliaryContentMeta, content::ContentSource, curseforge::{CachedCurseforgeFileInfo, CurseforgeGetFilesRequest, CurseforgeGetModFilesRequest, CurseforgeModLoaderType}, minecraft_profile::{MinecraftProfileResponse, SkinVariant}, modrinth::{ModrinthLoader, ModrinthSideRequirement}, version::{LaunchArgument, LaunchArgumentValue}};
@@ -273,102 +273,28 @@ impl BackendState {
                 instance.update_session();
                 self.send.send(instance.create_modify_message());
             },
+            MessageToBackend::StartInstanceByName { name, quick_play } => {
+                let mut id = None;
+
+                for instance in self.instance_state.read().instances.iter() {
+                    if instance.name == &name {
+                        id = Some(instance.id);
+                        break;
+                    } else if instance.name.eq_ignore_ascii_case(&name) {
+                        id = Some(instance.id);
+                    }
+                }
+
+                if let Some(id) = id {
+                    self.start_instance(id, quick_play, Default::default()).await
+                }
+            },
             MessageToBackend::StartInstance {
                 id,
                 quick_play,
                 modal_action,
             } => {
-                let keepalive = KeepAlive::new();
-
-                let (dot_minecraft, configuration) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
-                    if let Some(launch_keepalive) = &instance.launch_keepalive && launch_keepalive.is_alive() {
-                        modal_action.set_error_message("Can't launch instance, already launching".into());
-                        modal_action.set_finished();
-                        return;
-                    }
-
-                    instance.launch_keepalive = Some(keepalive.create_handle());
-
-                    self.send.send(MessageToFrontend::MoveInstanceToTop {
-                        id
-                    });
-                    self.send.send(instance.create_modify_message());
-
-                    (instance.dot_minecraft_path.clone(), instance.configuration.get().clone())
-                } else {
-                    self.send.send_error("Can't launch instance, unknown id");
-                    modal_action.set_error_message("Can't launch instance, unknown id".into());
-                    modal_action.set_finished();
-                    return;
-                };
-
-                scopeguard::defer! {
-                    modal_action.set_finished();
-                    drop(keepalive);
-                    if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
-                        if let Some(launch_keepalive) = &instance.launch_keepalive && !launch_keepalive.is_alive() {
-                            instance.launch_keepalive = None;
-                        }
-                        self.send.send(instance.create_modify_message());
-                    }
-                }
-
-                let Some(login_info) = self.get_login_info(&modal_action, configuration.preferred_account).await else {
-                    modal_action.set_error_message("Unable to log in to Minecraft account".into());
-                    return;
-                };
-
-                let add_mods = tokio::select! {
-                    add_mods = self.prelaunch(id, &modal_action) => add_mods,
-                    _ = modal_action.request_cancel.cancelled() => {
-                        self.send.send(MessageToFrontend::CloseModal);
-                        return;
-                    }
-                };
-
-                if modal_action.error.read().is_some() {
-                    self.send.send(MessageToFrontend::Refresh);
-                    return;
-                }
-
-                let launch_tracker = ProgressTracker::new(Arc::from("Launching"), self.send.clone());
-                modal_action.trackers.push(launch_tracker.clone());
-
-                let result = self.launcher.launch(&self.redirecting_http_client, dot_minecraft, configuration, quick_play, login_info, add_mods, &launch_tracker, &modal_action).await;
-
-                if matches!(result, Err(LaunchError::CancelledByUser)) {
-                    self.send.send(MessageToFrontend::CloseModal);
-                    return;
-                }
-
-                let is_err = result.is_err();
-                match result {
-                    Ok(mut child) => {
-                        if !self.config.write().get().dont_open_game_output_when_launching {
-                            if let Some(stdout) = child.stdout.take() {
-                                log_reader::start_game_output(stdout, child.stderr.take(), self.send.clone());
-                            }
-                        }
-
-                        // Close handles if unused
-                        child.stderr.take();
-                        child.stdin.take();
-                        child.stdout.take();
-
-                        if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
-                            instance.processes.push(child.process);
-                            instance.update_session();
-                            self.quit_coordinator.set_can_quit(false);
-                        }
-                    },
-                    Err(ref err) => {
-                        log::error!("Failed to launch due to error: {:?}", &err);
-                        modal_action.set_error_message(format!("{}", &err).into());
-                    },
-                }
-
-                launch_tracker.set_finished(ProgressTrackerFinishType::from_err(is_err));
-                launch_tracker.notify();
+                self.start_instance(id, quick_play, modal_action).await
             },
             MessageToBackend::SetContentEnabled { id, content_ids: mod_ids, enabled } => {
                 let mut instance_state = self.instance_state.write();
@@ -1959,6 +1885,99 @@ impl BackendState {
                 self.should_quit.store(true, Ordering::Relaxed);
             },
         }
+    }
+
+    async fn start_instance(self: &Arc<Self>, id: InstanceID, quick_play: Option<QuickPlayLaunch>, modal_action: ModalAction) {
+        let keepalive = KeepAlive::new();
+
+        let (dot_minecraft, configuration) = if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+            if let Some(launch_keepalive) = &instance.launch_keepalive && launch_keepalive.is_alive() {
+                modal_action.set_error_message("Can't launch instance, already launching".into());
+                modal_action.set_finished();
+                return;
+            }
+
+            instance.launch_keepalive = Some(keepalive.create_handle());
+
+            self.send.send(MessageToFrontend::MoveInstanceToTop {
+                id
+            });
+            self.send.send(instance.create_modify_message());
+
+            (instance.dot_minecraft_path.clone(), instance.configuration.get().clone())
+        } else {
+            self.send.send_error("Can't launch instance, unknown id");
+            modal_action.set_error_message("Can't launch instance, unknown id".into());
+            modal_action.set_finished();
+            return;
+        };
+
+        scopeguard::defer! {
+            modal_action.set_finished();
+            drop(keepalive);
+            if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+                if let Some(launch_keepalive) = &instance.launch_keepalive && !launch_keepalive.is_alive() {
+                    instance.launch_keepalive = None;
+                }
+                self.send.send(instance.create_modify_message());
+            }
+        }
+
+        let Some(login_info) = self.get_login_info(&modal_action, configuration.preferred_account).await else {
+            modal_action.set_error_message("Unable to log in to Minecraft account".into());
+            return;
+        };
+
+        let add_mods = tokio::select! {
+            add_mods = self.prelaunch(id, &modal_action) => add_mods,
+            _ = modal_action.request_cancel.cancelled() => {
+                self.send.send(MessageToFrontend::CloseModal);
+                return;
+            }
+        };
+
+        if modal_action.error.read().is_some() {
+            self.send.send(MessageToFrontend::Refresh);
+            return;
+        }
+
+        let launch_tracker = ProgressTracker::new(Arc::from("Launching"), self.send.clone());
+        modal_action.trackers.push(launch_tracker.clone());
+        let result = self.launcher.launch(&self.redirecting_http_client, dot_minecraft, configuration, quick_play, login_info, add_mods, &launch_tracker, &modal_action).await;
+
+        if matches!(result, Err(LaunchError::CancelledByUser)) {
+            self.send.send(MessageToFrontend::CloseModal);
+            return;
+        }
+
+        let is_err = result.is_err();
+        match result {
+            Ok(mut child) => {
+                if !self.config.write().get().dont_open_game_output_when_launching {
+                    if let Some(stdout) = child.stdout.take() {
+                        log_reader::start_game_output(stdout, child.stderr.take(), self.send.clone());
+                    }
+                }
+
+                // Close handles if unused
+                child.stderr.take();
+                child.stdin.take();
+                child.stdout.take();
+
+                if let Some(instance) = self.instance_state.write().instances.get_mut(id) {
+                    instance.processes.push(child.process);
+                    instance.update_session();
+                    self.quit_coordinator.set_can_quit(false);
+                }
+            },
+            Err(ref err) => {
+                log::error!("Failed to launch due to error: {:?}", &err);
+                modal_action.set_error_message(format!("{}", &err).into());
+            },
+        }
+
+        launch_tracker.set_finished(ProgressTrackerFinishType::from_err(is_err));
+        launch_tracker.notify();
     }
 
     fn extract_skin_url_from_profile(profile_json: &str) -> Option<Arc<str>> {

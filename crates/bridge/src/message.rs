@@ -94,6 +94,10 @@ pub enum MessageToBackend {
     KillInstance {
         id: InstanceID,
     },
+    StartInstanceByName {
+        name: String,
+        quick_play: Option<QuickPlayLaunch>
+    },
     StartInstance {
         id: InstanceID,
         quick_play: Option<QuickPlayLaunch>,
@@ -338,6 +342,7 @@ pub enum MessageToFrontend {
     UpdateAvailable {
         update: UpdatePrompt,
     },
+    OpenOrFocusMainWindow,
 }
 
 #[derive(Debug, Default)]

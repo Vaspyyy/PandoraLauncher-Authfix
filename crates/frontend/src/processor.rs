@@ -247,6 +247,22 @@ impl Processor {
                         }
                     }
                 });
+            },
+            MessageToFrontend::OpenOrFocusMainWindow => {
+                self.quit_coordinator.set_can_quit(false);
+
+                if let Some(handle) = self.main_window_handle {
+                    let res = handle.update(cx, |_, window, _| {
+                        window.activate_window();
+                    });
+                    if res.is_ok() {
+                        return;
+                    }
+                }
+
+                self.main_window_handle = Some(crate::open_main_window(&self.data, cx));
+                self.main_window_hidden.store(false, std::sync::atomic::Ordering::SeqCst);
+                self.process_messages_waiting_for_window(cx);
             }
         }
     }
