@@ -244,7 +244,7 @@ impl InstanceSettingsSubpage {
             #[cfg(target_os = "linux")]
             mangohud_available: command::is_command_available("mangohud"),
             #[cfg(target_os = "linux")]
-            gamemode_available: command::is_command_available("gamemoderun2"),
+            gamemode_available: command::is_command_available("gamemoderun"),
             new_name_change_state: NewNameChangeState::NoChange,
             icon,
             backend_handle,
